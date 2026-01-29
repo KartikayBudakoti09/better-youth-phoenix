@@ -12,15 +12,15 @@ from datetime import date, timedelta
 from typing import Dict, List
 from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
+
 # Import Databricks SQL connector
 try:
     from databricks import sql
 except ImportError:
     # Fallback import name
     import databricks.sql as sql
-
-# Load environment variables from .env file
-load_dotenv()
 
 
 # ============================================================================
@@ -502,3 +502,344 @@ def markdown_to_pdf(markdown_text: str, output_path: str = "report.pdf") -> str:
     doc = SimpleDocTemplate(output_path, rightMargin=48, leftMargin=48, topMargin=48, bottomMargin=48)
     doc.build(flowables)
     return output_path
+
+
+# ============================================================================
+# RESUME & LINKEDIN BUILDER
+# ============================================================================
+
+def _keywords_from_text(text: str, min_len: int = 3) -> List[str]:
+    """Extract keywords from text."""
+    if not text:
+        return []
+    text = re.sub(r"[^\w\s]", " ", text.lower())
+    words = [w for w in text.split() if len(w) >= min_len]
+    stop = {"the","and","for","with","from","that","this","their","have","will","are","our","in","on","to","a","an","of"}
+    keywords = [w for w in words if w not in stop]
+    return list(dict.fromkeys(keywords))
+
+
+def _join_preview(items: List[str], max_items: int = 6) -> str:
+    """Join list items for display."""
+    return ", ".join([str(i) for i in items[:max_items]])
+
+
+def _score_relevance(texts: List[str], keywords: List[str]) -> int:
+    """Score text relevance to keywords."""
+    if not texts or not keywords:
+        return 0
+    text = " ".join([t or "" for t in texts]).lower()
+    score = 0
+    for kw in keywords:
+        if kw in text:
+            score += 1
+    return score
+
+
+def _filter_passed_certifications(certs: list) -> list:
+    """Return only certifications where passed is truthy."""
+    if not certs:
+        return []
+    def passed_flag(c):
+        v = c.get("passed") if isinstance(c, dict) else None
+        if v is None:
+            return False
+        if isinstance(v, (int, float)):
+            return bool(v)
+        if isinstance(v, str):
+            return v.lower() in ("1","true","t","yes","y")
+        return bool(v)
+    return [c for c in certs if passed_flag(c)]
+
+
+def fetch_student_core(student_id: str) -> Dict:
+    """Fetch core student metadata."""
+    sid = safe_id_literal(student_id)
+    q = f"""
+    SELECT * FROM hackathon.amer.students
+    WHERE student_id = {sid}
+    LIMIT 1
+    """
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                rows = query_table(cur, q)
+                return rows[0] if rows else {}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def fetch_academic_records(student_id: str, limit=6) -> List[Dict]:
+    """Fetch student academic records."""
+    sid = safe_id_literal(student_id)
+    q = f"""
+    SELECT academic_year, semester, grade_level, school_name, gpa, attendance_rate, record_date, notes
+    FROM hackathon.amer.academic_records
+    WHERE student_id = {sid}
+    ORDER BY record_date DESC
+    LIMIT {limit}
+    """
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                return query_table(cur, q)
+    except Exception:
+        return []
+
+
+def fetch_student_skills(student_id: str) -> List[Dict]:
+    """Fetch student skills with proficiency levels."""
+    sid = safe_id_literal(student_id)
+    q = f"""
+    SELECT ss.skill_id, ss.initial_proficiency_level, ss.current_proficiency_level, ss.last_assessment_date, s.skill_name
+    FROM hackathon.amer.student_skills ss
+    LEFT JOIN hackathon.amer.skills s ON ss.skill_id = s.skill_id
+    WHERE ss.student_id = {sid}
+    ORDER BY ss.last_assessment_date DESC
+    """
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                return query_table(cur, q)
+    except Exception:
+        return []
+
+
+def fetch_certifications(student_id: str) -> List[Dict]:
+    """Fetch student certifications."""
+    sid = safe_id_literal(student_id)
+    q = f"""
+    SELECT sc.attempt_date, sc.passed, c.certification_name, c.issuing_organization, c.certification_type, sc.notes
+    FROM hackathon.amer.student_certifications sc
+    LEFT JOIN hackathon.amer.certifications c ON sc.certification_id = c.certification_id
+    WHERE sc.student_id = {sid}
+    ORDER BY sc.attempt_date DESC
+    """
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                return query_table(cur, q)
+    except Exception:
+        return []
+
+
+def fetch_media_projects(student_id: str, limit: int = 8) -> list:
+    """Fetch media projects linked to student."""
+    sid = safe_literal(student_id)
+    q1 = f"""
+    SELECT project_title, project_type, description, start_date, target_audience, views_count, likes_count
+    FROM hackathon.amer.media_projects
+    WHERE created_by_student_id = {sid}
+    ORDER BY start_date DESC
+    LIMIT {limit}
+    """
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                return query_table(cur, q1)
+    except Exception as e:
+        # Try fallback join
+        q2 = f"""
+        SELECT mp.project_title, mp.project_type, mp.description, mp.start_date, mp.target_audience, mp.views_count, mp.likes_count
+        FROM hackathon.amer.media_projects mp
+        JOIN hackathon.amer.project_participants pp ON mp.project_id = pp.project_id
+        WHERE pp.student_id = {sid}
+        ORDER BY mp.start_date DESC
+        LIMIT {limit}
+        """
+        try:
+            with db_connect() as conn:
+                with conn.cursor() as cur:
+                    return query_table(cur, q2)
+        except Exception:
+            return []
+
+
+def fetch_employment_placements(student_id: str, limit=6) -> List[Dict]:
+    """Fetch student employment placements."""
+    sid = safe_id_literal(student_id)
+    q = f"""
+    SELECT employer_name, industry, job_title, hourly_wage, start_date, end_date, is_current, student_satisfaction, notes
+    FROM hackathon.amer.employment_placements
+    WHERE student_id = {sid}
+    ORDER BY start_date DESC
+    LIMIT {limit}
+    """
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                return query_table(cur, q)
+    except Exception:
+        return []
+
+
+def generate_student_resume_and_linkedin(
+    student_id: str,
+    job_text: str | None = None,
+    industry: str | None = None,
+    months_recent: int = 36
+) -> Dict:
+    """Generate resume markdown and LinkedIn post from structured student data."""
+    # Fetch all data
+    core = fetch_student_core(student_id)
+    academics = fetch_academic_records(student_id)
+    skills = fetch_student_skills(student_id)
+    certs = fetch_certifications(student_id)
+    projects = fetch_media_projects(student_id)
+    placements = fetch_employment_placements(student_id)
+
+    # Build keyword set
+    job_kw = _keywords_from_text((job_text or "") + " " + (industry or ""))
+    
+    # Score relevance
+    skill_relevance = sorted(skills, key=lambda s: -_score_relevance([s.get("skill_name","")], job_kw))
+    project_relevance = sorted(projects, key=lambda p: -_score_relevance([p.get("project_title",""), p.get("description","")], job_kw))
+    cert_relevance = sorted(certs, key=lambda c: -_score_relevance([c.get("certification_name",""), c.get("issuing_organization","")], job_kw))
+    placement_relevance = sorted(placements, key=lambda e: -_score_relevance([e.get("job_title",""), e.get("notes",""), e.get("industry","")], job_kw))
+
+    # Build resume sections
+    profile_lines = []
+    name_line = core.get("email") or core.get("student_id") or student_id
+    headline = job_text or industry or "Candidate for opportunities"
+    
+    profile_lines.append(f"# {name_line}")
+    profile_lines.append(f"**{headline}**")
+    profile_lines.append("")
+    
+    # Summary
+    summary_parts = []
+    if job_kw:
+        top_k = ", ".join(job_kw[:6])
+        summary_parts.append(f"Goal-oriented candidate with experience in {industry or 'relevant sectors'}, focused on {top_k}.")
+    else:
+        summary_parts.append("Motivated candidate with practical training and placement experience.")
+    
+    if placement_relevance:
+        p = placement_relevance[0]
+        if p.get("job_title") and p.get("employer_name"):
+            summary_parts.append(f"Most recently placed as {p.get('job_title')} at {p.get('employer_name')}.")
+    
+    profile_lines.append(" ".join(summary_parts))
+    profile_lines.append("")
+
+    # Skills
+    profile_lines.append("## Key Skills")
+    if skill_relevance:
+        skill_items = []
+        for s in skill_relevance[:12]:
+            nm = s.get("skill_name") or s.get("skill_id")
+            prof = s.get("current_proficiency_level")
+            prof_txt = f" — {prof}" if prof else ""
+            skill_items.append(f"- {nm}{prof_txt}")
+        profile_lines.extend(skill_items)
+    else:
+        profile_lines.append("- Training and professional skills")
+    profile_lines.append("")
+
+    # Experience
+    profile_lines.append("## Experience")
+    if placement_relevance:
+        for e in placement_relevance[:6]:
+            title = e.get("job_title") or "Position"
+            emp = e.get("employer_name") or e.get("industry") or "Employer"
+            dates = ""
+            if e.get("start_date"):
+                dates = f" ({e.get('start_date')}{' - ' + str(e.get('end_date')) if e.get('end_date') else ' - present'})"
+            wage = e.get("hourly_wage")
+            wage_txt = f" — ${wage:.2f}/hr" if isinstance(wage, (int, float)) else ""
+            notes = (e.get("notes") or "").replace("\n", " ")[:220]
+            profile_lines.append(f"- **{title}**, {emp}{dates}{wage_txt} — {notes}")
+    else:
+        profile_lines.append("- No recorded placements")
+    profile_lines.append("")
+
+    # Projects
+    profile_lines.append("## Portfolio & Projects")
+    if project_relevance:
+        for pr in project_relevance[:6]:
+            title = pr.get("project_title") or "Project"
+            ptype = pr.get("project_type") or ""
+            desc = (pr.get("description") or "")[:300].replace("\n"," ")
+            views = pr.get("views_count")
+            views_txt = f" — {views} views" if views else ""
+            profile_lines.append(f"- **{title}** ({ptype}){views_txt} — {desc}")
+    else:
+        profile_lines.append("- No media projects recorded")
+    profile_lines.append("")
+
+    # Certifications
+    profile_lines.append("## Certifications")
+    passed_certs = _filter_passed_certifications(cert_relevance)
+    if passed_certs:
+        for c in passed_certs[:8]:
+            cname = c.get("certification_name") or ""
+            org = c.get("issuing_organization") or ""
+            when = c.get("attempt_date")
+            profile_lines.append(f"- {cname} ({org}){' — ' + str(when) if when else ''}")
+    else:
+        profile_lines.append("- No formal certifications recorded")
+    profile_lines.append("")
+
+    # Education
+    profile_lines.append("## Education")
+    if academics:
+        for a in academics[:4]:
+            school = a.get("school_name") or ""
+            grade = a.get("grade_level")
+            gpa = a.get("gpa")
+            line = f"- {school}"
+            if grade:
+                line += f", Grade {grade}"
+            if gpa:
+                line += f" — GPA {gpa}"
+            profile_lines.append(line)
+    else:
+        profile_lines.append("- Academic records not available")
+    profile_lines.append("")
+
+    # Contact
+    profile_lines.append("## Contact")
+    email = core.get("email")
+    phone = core.get("phone")
+    if email:
+        profile_lines.append(f"- Email: {email}")
+    if phone:
+        profile_lines.append(f"- Phone: {phone}")
+    if not email and not phone:
+        profile_lines.append("- Contact info not available")
+
+    resume_md = "\n\n".join(profile_lines)
+
+    # LinkedIn post
+    linkedin_parts = []
+    name_display = core.get("student_id") or "Recent Graduate"
+    linkedin_parts.append(f"{name_display} — Seeking opportunities in {industry or (job_text or 'related roles')}.")
+    
+    key_strengths = []
+    if skill_relevance:
+        key_strengths.append(skill_relevance[0].get("skill_name") or skill_relevance[0].get("skill_id"))
+    if cert_relevance:
+        key_strengths.append(cert_relevance[0].get("certification_name"))
+    
+    linkedin_parts.append("I bring hands-on experience in " + (", ".join([k for k in key_strengths if k]) or "skills and projects") + ", plus real-world placements with employer partners.")
+    
+    if placement_relevance:
+        p = placement_relevance[0]
+        linkedin_parts.append(f"Most recently worked as {p.get('job_title')} at {p.get('employer_name') or p.get('industry')}, where I focused on practical deliverables.")
+    
+    linkedin_parts.append("If your team is hiring or wants to see a portfolio, DM me or email " + (core.get("email") or "[email]") + ".")
+    linkedin_md = "\n\n".join(linkedin_parts)
+
+    return {
+        "resume_md": resume_md,
+        "linkedin_md": linkedin_md,
+        "structured": {
+            "core": core,
+            "academics": academics,
+            "skills": skills,
+            "certifications": certs,
+            "projects": projects,
+            "placements": placements
+        }
+    }
+

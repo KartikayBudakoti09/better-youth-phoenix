@@ -4,18 +4,27 @@ Tabs: Student Progress Report | Investor Impact Report | About
 """
 
 import os
+import sys
 import streamlit as st
 import tempfile
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file FIRST, before any backend imports
+env_path = Path(__file__).parent / '.env'
+load_dotenv(dotenv_path=env_path, override=True)
+
+# Verify Databricks credentials are loaded
+if not os.getenv('DATABRICKS_HOST'):
+    st.error('❌ DATABRICKS_HOST not found in .env file')
+    st.stop()
 
 from backend import (
     generate_student_summary,
     generate_narrative_report,
     generate_investor_report,
     build_investor_narrative_from_summary,
+    generate_student_resume_and_linkedin,
     markdown_to_pdf,
 )
 
@@ -27,7 +36,7 @@ st.markdown("Generate student progress reports and investor impact summaries fro
 # Sidebar navigation
 page = st.sidebar.radio(
     "Select Report Type",
-    ["📊 Student Progress", "💰 Investor Impact", "ℹ️ About"],
+    ["📊 Student Progress", "💰 Investor Impact", "🎓 Resume Builder", "ℹ️ About"],
     label_visibility="visible"
 )
 
@@ -149,6 +158,96 @@ elif page == "💰 Investor Impact":
                     os.unlink(pdf_path)
             with col2:
                 st.info(f"📊 Program: **{program_id or 'ALL PROGRAMS'}** | Period: **{months} months**")
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+
+
+# ============================================================================
+# PAGE: RESUME BUILDER
+# ============================================================================
+
+elif page == "🎓 Resume Builder":
+    st.header("Student Resume & LinkedIn Builder")
+    st.markdown("Generate a professional resume and LinkedIn post tailored to a specific job or industry.")
+    
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        student_id = st.text_input("Student ID", value="STU-000357", help="Enter the student identifier")
+    with col2:
+        job_text = st.text_input("Job/Role Target", value="", help="e.g., 'Data Analyst' or leave blank")
+    with col3:
+        industry = st.text_input("Industry Focus", value="", help="e.g., 'Tech' or 'Finance'")
+
+    if st.button("🚀 Generate Resume & LinkedIn Post", key="resume_gen", use_container_width=True):
+        try:
+            with st.spinner("📋 Fetching student data..."):
+                result = generate_student_resume_and_linkedin(
+                    student_id,
+                    job_text=job_text if job_text else None,
+                    industry=industry if industry else None
+                )
+            
+            st.success("✅ Resume and LinkedIn post generated!")
+            
+            # Tabs for different views
+            tab1, tab2, tab3 = st.tabs(["📄 Resume", "🔗 LinkedIn Post", "📥 Downloads"])
+            
+            with tab1:
+                st.subheader("Professional Resume (Markdown)")
+                resume_md = result.get("resume_md", "")
+                st.markdown(resume_md)
+                st.text_area("Copy resume text:", value=resume_md, height=300, disabled=True, key="resume_copy")
+            
+            with tab2:
+                st.subheader("LinkedIn Post")
+                linkedin_md = result.get("linkedin_md", "")
+                st.markdown(linkedin_md)
+                st.text_area("Copy LinkedIn post:", value=linkedin_md, height=200, disabled=True, key="linkedin_copy")
+            
+            with tab3:
+                st.subheader("Download Options")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Resume markdown download
+                    st.download_button(
+                        label="📄 Download Resume (Markdown)",
+                        data=resume_md,
+                        file_name=f"{student_id}_resume.md",
+                        mime="text/markdown",
+                        use_container_width=True
+                    )
+                
+                with col2:
+                    # LinkedIn post download
+                    st.download_button(
+                        label="🔗 Download LinkedIn Post (Text)",
+                        data=linkedin_md,
+                        file_name=f"{student_id}_linkedin_post.txt",
+                        mime="text/plain",
+                        use_container_width=True
+                    )
+                
+                # PDF Resume
+                st.markdown("---")
+                st.subheader("Resume PDF")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    try:
+                        pdf_path = markdown_to_pdf(resume_md, tmp.name)
+                        with open(pdf_path, "rb") as pdf_file:
+                            st.download_button(
+                                label="📥 Download Resume PDF",
+                                data=pdf_file.read(),
+                                file_name=f"{student_id}_resume.pdf",
+                                mime="application/pdf",
+                                use_container_width=True
+                            )
+                        os.unlink(pdf_path)
+                    except Exception as e:
+                        st.warning(f"Could not generate PDF: {e}")
+                
+                st.info(f"📊 Resume for: **{student_id}** | Target: **{job_text or industry or 'General'}**")
+        
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
 
