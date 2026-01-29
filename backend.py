@@ -843,3 +843,239 @@ def generate_student_resume_and_linkedin(
         }
     }
 
+
+# ============================================================================
+# LEARNING PATH & GOAL SUGGESTION
+# ============================================================================
+
+def _like_pat(s: str) -> str:
+    """SQL LIKE pattern."""
+    return "%" + s.replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _get_top_jobs_for_keyword(keyword: str, provider: str | None = None) -> List[str]:
+    """Get top job roles for a keyword using fallback mapping or external APIs."""
+    keyword_lower = keyword.lower().strip()
+    
+    # Fallback role mappings (curated, no external APIs needed)
+    roles_map = {
+        "media": ["Content Creator", "Social Media Manager", "Video Producer", "Graphic Designer", "Influencer", "Photographer"],
+        "technology": ["Software Engineer", "Frontend Developer", "Backend Developer", "Full Stack Developer", "Data Scientist", "DevOps Engineer"],
+        "marketing": ["Marketing Manager", "Digital Marketer", "SEO Specialist", "Content Marketer", "Brand Manager"],
+        "finance": ["Financial Analyst", "Accountant", "Investment Banker", "Tax Consultant", "Auditor"],
+        "sales": ["Sales Representative", "Account Executive", "Sales Manager", "Business Development"],
+        "healthcare": ["Nurse", "Doctor", "Medical Assistant", "Healthcare Coordinator", "Pharmacist"],
+        "education": ["Teacher", "Tutor", "Education Coordinator", "Curriculum Developer"],
+        "design": ["UX Designer", "UI Designer", "Product Designer", "Interaction Designer", "Visual Designer"],
+        "business": ["Business Analyst", "Project Manager", "Operations Manager", "Strategy Consultant"],
+        "creative": ["Creative Director", "Art Director", "Copywriter", "Content Creator", "Designer"],
+    }
+    
+    # Match keyword to category
+    for category, roles in roles_map.items():
+        if keyword_lower in category or category in keyword_lower:
+            return roles
+    
+    # If no exact match, return a generic list
+    return ["Professional in " + keyword, "Specialist", "Coordinator", "Manager"]
+
+
+def define_learning_goals_and_suggestions(
+    student_id: str,
+    target_keyword: str,
+    call_model: bool = False
+) -> Dict:
+    """
+    Generate learning path, goal recommendations, and skill gaps for a student targeting a role.
+    
+    Returns structured dict with:
+    - student_id, target_keyword
+    - current_skills, current_certs, current_placements
+    - suggested_roles (top 5 for keyword)
+    - skill_gaps (required skills not yet acquired)
+    - learning_plan (short/mid/long term activities)
+    - certification_recommendations
+    - program_recommendations
+    - portfolio_suggestions
+    - (optional) llm_narrative
+    """
+    
+    # Fetch student data
+    core = fetch_student_core(student_id)
+    skills = fetch_student_skills(student_id)
+    certs = fetch_certifications(student_id)
+    placements = fetch_employment_placements(student_id)
+    academics = fetch_academic_records(student_id)
+    
+    # Get suggested roles
+    suggested_roles = _get_top_jobs_for_keyword(target_keyword)
+    top_role = suggested_roles[0] if suggested_roles else "Professional"
+    
+    # Extract current skill names
+    current_skill_names = set([s.get("skill_name") or s.get("skill_id") for s in skills if s.get("skill_name") or s.get("skill_id")])
+    
+    # Define common skill requirements by role (simplified mapping)
+    skill_requirements = {
+        "software engineer": ["Python", "JavaScript", "Git", "Database Design", "API Design", "Testing"],
+        "data scientist": ["Python", "SQL", "Statistics", "Machine Learning", "Data Visualization", "R"],
+        "frontend developer": ["HTML", "CSS", "JavaScript", "React", "UI Design", "Responsive Design"],
+        "backend developer": ["Python", "Java", "Node.js", "Database Design", "API Design", "Cloud"],
+        "content creator": ["Content Writing", "Video Editing", "Social Media", "Photography", "Adobe Suite"],
+        "digital marketer": ["Social Media Marketing", "Google Analytics", "SEO", "Content Marketing", "Email Marketing"],
+        "product manager": ["Product Strategy", "Data Analysis", "User Research", "Roadmap Planning", "Communication"],
+    }
+    
+    # Get requirements for target role
+    role_lower = top_role.lower()
+    required_skills = set()
+    for role_key, skills_list in skill_requirements.items():
+        if role_key in role_lower:
+            required_skills = set(skills_list)
+            break
+    
+    # If no match, use generic tech/business skills
+    if not required_skills:
+        required_skills = {"Communication", "Problem Solving", "Technical Skills", "Project Management"}
+    
+    # Calculate gaps
+    skill_gaps = required_skills - current_skill_names
+    
+    # Learning plan (3 phases)
+    learning_plan = {
+        "short_term": {
+            "timeframe": "0-3 months",
+            "activities": [
+                f"Complete online course in: {list(skill_gaps)[:2] if skill_gaps else 'Advanced skills'}",
+                f"Start portfolio project aligned with {top_role}",
+                "Practice daily with hands-on exercises"
+            ]
+        },
+        "medium_term": {
+            "timeframe": "3-6 months",
+            "activities": [
+                f"Build 2-3 portfolio projects showcasing {list(skill_gaps)[:1] if skill_gaps else 'core skills'}",
+                f"Seek internship/project experience in {target_keyword}",
+                "Network with professionals in target field"
+            ]
+        },
+        "long_term": {
+            "timeframe": "6-12 months",
+            "activities": [
+                f"Secure full-time role as {top_role}",
+                "Continue learning advanced skills",
+                "Contribute to open source / mentor others"
+            ]
+        }
+    }
+    
+    # Certification recommendations from DB + fallback
+    cert_recommendations = []
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                keyword_pattern = _like_pat(target_keyword)
+                cert_q = f"""
+                SELECT certification_name, issuing_organization, certification_type
+                FROM hackathon.amer.certifications
+                WHERE certification_name LIKE '{keyword_pattern}' 
+                   OR certification_type LIKE '{keyword_pattern}'
+                LIMIT 5
+                """
+                results = query_table(cur, cert_q)
+                cert_recommendations = [{"name": r.get("certification_name"), "org": r.get("issuing_organization")} for r in results]
+    except Exception:
+        pass
+    
+    # Fallback certs
+    if not cert_recommendations:
+        if "tech" in target_keyword.lower() or "software" in target_keyword.lower():
+            cert_recommendations = [
+                {"name": "AWS Certified Developer", "org": "Amazon"},
+                {"name": "Google Cloud Professional", "org": "Google"},
+                {"name": "CompTIA Security+", "org": "CompTIA"}
+            ]
+        elif "data" in target_keyword.lower():
+            cert_recommendations = [
+                {"name": "Google Data Analytics Professional", "org": "Google"},
+                {"name": "IBM Data Science Professional", "org": "IBM"}
+            ]
+        elif "marketing" in target_keyword.lower() or "media" in target_keyword.lower():
+            cert_recommendations = [
+                {"name": "Google Digital Garage", "org": "Google"},
+                {"name": "Meta Blueprint Certification", "org": "Meta"}
+            ]
+        else:
+            cert_recommendations = [
+                {"name": "Professional Development Course", "org": "Coursera"},
+                {"name": "Specialized Training Program", "org": "LinkedIn Learning"}
+            ]
+    
+    # Program recommendations from DB
+    program_recommendations = []
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                keyword_pattern = _like_pat(target_keyword)
+                prog_q = f"""
+                SELECT DISTINCT program_name, program_description
+                FROM hackathon.amer.programs
+                WHERE program_name LIKE '{keyword_pattern}'
+                   OR program_description LIKE '{keyword_pattern}'
+                LIMIT 5
+                """
+                results = query_table(cur, prog_q)
+                program_recommendations = [r for r in results]
+    except Exception:
+        pass
+    
+    # Portfolio suggestions
+    portfolio_suggestions = [
+        f"Create 1-2 projects directly related to {top_role}",
+        "Document your learning journey with blog posts",
+        "Build a personal portfolio website showcasing your work",
+        f"Contribute to open source projects in {target_keyword} domain",
+        "Create a GitHub profile with polished repositories"
+    ]
+    
+    result = {
+        "student_id": student_id,
+        "target_keyword": target_keyword,
+        "target_role": top_role,
+        "current_skills": list(current_skill_names)[:10],
+        "current_certifications": [c.get("certification_name") for c in certs if c.get("passed")][:5],
+        "current_placements": [{"title": p.get("job_title"), "employer": p.get("employer_name")} for p in placements][:3],
+        "suggested_roles": suggested_roles[:5],
+        "skill_gaps": list(skill_gaps),
+        "learning_plan": learning_plan,
+        "certification_recommendations": cert_recommendations,
+        "program_recommendations": program_recommendations,
+        "portfolio_suggestions": portfolio_suggestions
+    }
+    
+    # Optional LLM polish
+    if call_model:
+        prompt = f"""Based on this learning path summary, write an encouraging personalized learning recommendation (150-250 words) for {student_id} targeting {top_role}:
+
+Current Skills: {', '.join(result['current_skills'])}
+Skill Gaps: {', '.join(result['skill_gaps']) if result['skill_gaps'] else 'None identified'}
+Learning Timeline: 6-12 months
+Recommended Certifications: {', '.join([c['name'] for c in cert_recommendations[:3]])}
+
+Make it actionable, motivating, and specific to their situation."""
+        
+        try:
+            messages = [
+                {"role": "system", "content": "You are a supportive career counselor creating personalized learning paths."},
+                {"role": "user", "content": prompt}
+            ]
+            llm_output = call_databricks_model(messages=messages)
+            result["llm_narrative"] = llm_output
+        except Exception as e:
+            result["llm_narrative"] = None
+            result["llm_error"] = str(e)
+    
+    return result
+
+
+
+

@@ -7,6 +7,7 @@ import os
 import sys
 import streamlit as st
 import tempfile
+import pandas as pd
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -25,6 +26,7 @@ from backend import (
     generate_investor_report,
     build_investor_narrative_from_summary,
     generate_student_resume_and_linkedin,
+    define_learning_goals_and_suggestions,
     markdown_to_pdf,
 )
 
@@ -36,7 +38,7 @@ st.markdown("Generate student progress reports and investor impact summaries fro
 # Sidebar navigation
 page = st.sidebar.radio(
     "Select Report Type",
-    ["📊 Student Progress", "💰 Investor Impact", "🎓 Resume Builder", "ℹ️ About"],
+    ["📊 Student Progress", "💰 Investor Impact", "🎓 Resume Builder", "🎯 Learning Path", "ℹ️ About"],
     label_visibility="visible"
 )
 
@@ -247,6 +249,159 @@ elif page == "🎓 Resume Builder":
                         st.warning(f"Could not generate PDF: {e}")
                 
                 st.info(f"📊 Resume for: **{student_id}** | Target: **{job_text or industry or 'General'}**")
+        
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+
+
+# ============================================================================
+# PAGE: LEARNING PATH
+# ============================================================================
+
+elif page == "🎯 Learning Path":
+    st.header("Learning Path & Goal Recommendations")
+    st.markdown("Get personalized learning recommendations based on your target role or industry.")
+    
+    col1, col2, col3 = st.columns([2, 2, 1])
+    with col1:
+        student_id = st.text_input("Student ID", value="STU-000357", help="Enter the student identifier")
+    with col2:
+        target_keyword = st.text_input("Target Role/Industry", value="technology", help="e.g., 'technology', 'media', 'finance'")
+    with col3:
+        use_llm = st.checkbox("✨ LLM Polish", value=False, help="Generate AI-powered recommendations")
+
+    if st.button("🚀 Generate Learning Path", key="learning_gen", use_container_width=True):
+        try:
+            with st.spinner("📋 Analyzing skills and generating learning path..."):
+                result = define_learning_goals_and_suggestions(
+                    student_id,
+                    target_keyword=target_keyword,
+                    call_model=use_llm
+                )
+            
+            st.success("✅ Learning path generated!")
+            
+            # Display results
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Target Role", result.get("target_role", "N/A"))
+            with col2:
+                st.metric("Skill Gaps", len(result.get("skill_gaps", [])))
+            with col3:
+                st.metric("Current Skills", len(result.get("current_skills", [])))
+            with col4:
+                st.metric("Recommended Certs", len(result.get("certification_recommendations", [])))
+            
+            st.markdown("---")
+            
+            # Overview section
+            st.subheader("📊 Overview")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Current Skills:**")
+                if result.get("current_skills"):
+                    st.write(", ".join(result["current_skills"]))
+                else:
+                    st.write("No skills recorded yet")
+            with col2:
+                st.write("**Skill Gaps to Close:**")
+                if result.get("skill_gaps"):
+                    st.write(", ".join(result["skill_gaps"]))
+                else:
+                    st.write("✅ No major gaps identified")
+            
+            # LLM narrative (if enabled)
+            if use_llm and result.get("llm_narrative"):
+                st.markdown("---")
+                st.subheader("✨ AI-Generated Recommendation")
+                st.markdown(result["llm_narrative"])
+            
+            # Learning plan
+            st.markdown("---")
+            st.subheader("📅 3-Phase Learning Plan")
+            
+            for phase_name, phase_data in result.get("learning_plan", {}).items():
+                with st.expander(f"**{phase_name.replace('_', ' ').title()}** - {phase_data.get('timeframe')}"):
+                    for activity in phase_data.get("activities", []):
+                        st.write(f"• {activity}")
+            
+            # Recommendations
+            st.markdown("---")
+            st.subheader("🎓 Certifications")
+            if result.get("certification_recommendations"):
+                for cert in result["certification_recommendations"][:5]:
+                    st.write(f"• **{cert.get('name')}** - {cert.get('org', 'Various')}")
+            
+            st.subheader("🏢 Relevant Programs")
+            if result.get("program_recommendations"):
+                for prog in result["program_recommendations"][:5]:
+                    st.write(f"• {prog.get('program_name', 'Program')}")
+            else:
+                st.write("No specific programs found - check general learning platforms")
+            
+            st.subheader("📁 Portfolio Tips")
+            for tip in result.get("portfolio_suggestions", []):
+                st.write(f"• {tip}")
+            
+            # Export options
+            st.markdown("---")
+            st.subheader("📥 Export")
+            
+            # Build markdown for export
+            export_md = f"""# Learning Path for {student_id}
+
+## Target Role: {result.get('target_role')}
+
+### Current Skills
+{', '.join(result.get('current_skills', ['None recorded']))}
+
+### Skill Gaps to Address
+{', '.join(result.get('skill_gaps', ['None'])) if result.get('skill_gaps') else 'No major gaps'}
+
+### Learning Plan (3 Phases)
+
+#### Phase 1: Short Term (0-3 months)
+{''.join([f"- {a}\\n" for a in result.get('learning_plan', {}).get('short_term', {}).get('activities', [])])}
+
+#### Phase 2: Medium Term (3-6 months)
+{''.join([f"- {a}\\n" for a in result.get('learning_plan', {}).get('medium_term', {}).get('activities', [])])}
+
+#### Phase 3: Long Term (6-12 months)
+{''.join([f"- {a}\\n" for a in result.get('learning_plan', {}).get('long_term', {}).get('activities', [])])}
+
+### Recommended Certifications
+{''.join([f"- {c.get('name')} ({c.get('org')})\\n" for c in result.get('certification_recommendations', [])])}
+
+### Portfolio Development
+{''.join([f"- {t}\\n" for t in result.get('portfolio_suggestions', [])])}
+
+Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    label="📄 Download Learning Path (Markdown)",
+                    data=export_md,
+                    file_name=f"{student_id}_learning_path.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+            with col2:
+                # PDF export
+                import io
+                pdf_buffer = io.BytesIO()
+                try:
+                    markdown_to_pdf(export_md, pdf_buffer)
+                    st.download_button(
+                        label="📥 Download as PDF",
+                        data=pdf_buffer.getvalue(),
+                        file_name=f"{student_id}_learning_path.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.warning(f"PDF export not available: {e}")
         
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")

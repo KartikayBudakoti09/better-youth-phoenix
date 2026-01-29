@@ -1,4 +1,0 @@
-DATABRICKS_HOST=adb-7405616962374519.19.azuredatabricks.net
-DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/8f5a9850fb0fd35e
-DATABRICKS_TOKEN=dapid42a3c54417ea34df9790359ecb0df6c-2
-DATABRICKS_MODEL_ENDPOINT=https://adb-7405616962374519.19.azuredatabricks.net/serving-endpoints/databricks-claude-sonnet-4-5/invocations

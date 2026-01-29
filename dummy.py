@@ -1677,3 +1677,359 @@ structured = res['structured']
 # 2) Create a styled resume PDF (file path editable)
 out_pdf = build_styled_resume_pdf_from_structured(structured, output_path="STU-000357_styled_resume.pdf", student_display_name="STU-000357")
 print("Wrote:", out_pdf)
+
+
+###Learningpath.py 
+import os
+import re
+import requests
+from datetime import datetime
+from typing import List, Dict
+
+# Helper: sanitize LIKE pattern literal
+def _like_pat(s: str) -> str:
+    if s is None:
+        return "%%"
+    safe = str(s).lower().replace("'", "''")
+    return f"%{safe}%"
+
+# Helper: get top job titles from external search (optional) or fallback mapping
+def _get_top_jobs_for_keyword(keyword: str, top_n: int = 20, provider: str | None = None) -> List[str]:
+    keyword = (keyword or "").strip()
+    # provider: "serpapi" (SERPAPI_API_KEY), "bing" (BING_SUBSCRIPTION_KEY), or None
+    titles = []
+    if provider == "serpapi":
+        key = os.getenv("SERPAPI_API_KEY")
+        if not key:
+            raise RuntimeError("SERPAPI_API_KEY not configured in env")
+        q = f"top jobs {keyword} 2026"
+        try:
+            resp = requests.get("https://serpapi.com/search.json", params={"q": q, "num": min(top_n,50), "api_key": key}, timeout=20)
+            resp.raise_for_status()
+            j = resp.json()
+            # serpapi 'organic_results' often contain titles
+            for item in (j.get("organic_results") or []):
+                t = item.get("title") or item.get("position") or item.get("job_title")
+                if t:
+                    titles.append(t)
+            titles = list(dict.fromkeys(titles))[:top_n]
+        except Exception:
+            titles = []
+    elif provider == "bing":
+        key = os.getenv("BING_SUBSCRIPTION_KEY")
+        endpoint = os.getenv("BING_SEARCH_ENDPOINT") or "https://api.bing.microsoft.com/v7.0/search"
+        if not key:
+            raise RuntimeError("BING_SUBSCRIPTION_KEY not configured in env")
+        q = f"top jobs {keyword} 2026"
+        try:
+            r = requests.get(endpoint, params={"q": q, "count": min(50, top_n)}, headers={"Ocp-Apim-Subscription-Key": key}, timeout=20)
+            r.raise_for_status()
+            j = r.json()
+            for itm in j.get("webPages", {}).get("value", []):
+                t = itm.get("name")
+                if t:
+                    titles.append(t)
+            titles = list(dict.fromkeys(titles))[:top_n]
+        except Exception:
+            titles = []
+    # Fallback: curated roles map (no internet)
+    if not titles:
+        roles_map = {
+            "media": [
+                "Content Creator", "Social Media Producer", "Video Editor", "Production Assistant",
+                "Social Media Manager", "Multimedia Producer", "Digital Content Strategist",
+                "Audio Technician", "Junior Producer", "Community Manager", "Graphic Designer",
+                "Copywriter", "Motion Graphics Artist", "Broadcast Technician"
+            ],
+            "technology": [
+                "Frontend Developer", "Backend Developer", "Full Stack Developer", "QA Engineer",
+                "Data Analyst", "Data Engineer", "DevOps Engineer", "UX Designer",
+                "Product Manager", "Mobile Developer", "Cloud Engineer"
+            ],
+            "marketing": [
+                "Marketing Coordinator", "SEO Specialist", "Content Marketer", "Growth Marketer",
+                "PPC Specialist", "Marketing Analyst", "Brand Manager"
+            ],
+            "education": [
+                "Instructional Designer", "Teaching Assistant", "Program Coordinator",
+                "Curriculum Developer", "Education Specialist"
+            ],
+            "nonprofit": [
+                "Program Coordinator", "Fundraising Assistant", "Community Outreach Specialist",
+                "Volunteer Coordinator"
+            ]
+        }
+        key = keyword.lower()
+        # pick best matching mapping key
+        best = None
+        for k in roles_map:
+            if k in key or key in k:
+                best = k
+                break
+        if best is None:
+            # fallback to 'media' if ambiguous
+            best = "media" if "media" in key or key=="" else (list(roles_map.keys())[0] if key=="" else (key if key in roles_map else None))
+        titles = roles_map.get(best, [])
+        titles = titles[:top_n]
+    return titles
+
+# Main function requested by user (name corrected) + alias for original misspelling
+def define_learning_goals_and_suggestions(student_id: str,
+                                          keyword: str,
+                                          top_n_jobs: int = 20,
+                                          search_provider: str | None = None,
+                                          call_model: bool = False) -> Dict:
+    """
+    Build personalized learning goals and a suggested learning/career path for `student_id`
+    targeting jobs in `keyword` (e.g., 'media').
+    - If search_provider is 'serpapi' or 'bing', attempts to fetch current top job titles from the web (requires API keys).
+    - call_model: if True and DATABRICKS_MODEL_ENDPOINT+DATABRICKS_TOKEN exist, will request a polished rewrite.
+    Returns a dict with keys: 'learning_path_md', 'structured', 'model_output' (optional).
+    """
+    # 1) fetch student data from existing helpers (must exist in notebook)
+    try:
+        core = fetch_student_core(student_id)
+    except Exception as e:
+        core = {"student_id": student_id}
+    try:
+        skills = fetch_student_skills(student_id)
+    except Exception:
+        skills = []
+    try:
+        certs = fetch_certifications(student_id)
+    except Exception:
+        certs = []
+    try:
+        academics = fetch_academic_records(student_id, limit=6)
+    except Exception:
+        academics = []
+    try:
+        placements = fetch_employment_placements(student_id, limit=6)
+    except Exception:
+        placements = []
+
+    # normalize skill names
+    student_skill_names = [ (s.get("skill_name") or s.get("skill_id") or "").lower() for s in skills if s]
+    student_skill_names = list(dict.fromkeys([s for s in student_skill_names if s]))
+
+    # 2) get top job titles for keyword
+    job_titles = _get_top_jobs_for_keyword(keyword, top_n=top_n_jobs, provider=search_provider)
+
+    # 3) static map of role -> recommended skills & certs (minimal)
+    role_skill_map = {
+        "Content Creator": ["content creation", "video editing", "social media", "copywriting", "creative storytelling"],
+        "Social Media Producer": ["social media management", "community engagement", "scheduling tools", "analytics"],
+        "Video Editor": ["video editing", "premiere pro", "after effects", "color correction"],
+        "Production Assistant": ["production workflows", "scheduling", "audio basics"],
+        "Frontend Developer": ["html", "css", "javascript", "react"],
+        "Data Analyst": ["sql", "excel", "python", "data visualization"],
+        # add more as fallback; this is used for gap analysis
+    }
+
+    # 4) pick relevant roles by keyword fuzzy match (job_titles may already be good)
+    relevant_roles = []
+    for jt in job_titles:
+        # simplify to short role title by removing site names / years etc
+        role = re.split(r"[-|–:]", jt)[0].strip()
+        relevant_roles.append(role)
+    relevant_roles = list(dict.fromkeys(relevant_roles))[:top_n_jobs]
+
+    # 5) produce gap analysis and scored roles
+    role_summaries = []
+    for role in relevant_roles:
+        req_skills = role_skill_map.get(role, [])
+        # if no static req_skills, try to extract keywords from role name
+        if not req_skills:
+            req_skills = _keywords_from_text(role)[:6]
+        score = 0
+        matched = []
+        for rs in req_skills:
+            rsl = rs.lower()
+            if any(rsl in s for s in student_skill_names):
+                matched.append(rs)
+                score += 1
+        gap = [rs for rs in req_skills if rs not in matched]
+        role_summaries.append({"role": role, "required_skills": req_skills, "matched": matched, "gap": gap, "match_score": score})
+
+    # sort by best match_score (prefer roles they can quickly target)
+    role_summaries = sorted(role_summaries, key=lambda r: -r["match_score"])
+
+    # 6) find programs in DB that match keyword (best-effort)
+    kwpat = _like_pat(keyword)
+    programs_q = f"""
+    SELECT program_id, program_name, description, start_date, end_date, duration_weeks
+    FROM hackathon.amer.programs
+    WHERE lower(program_name) LIKE '{kwpat}' OR lower(description) LIKE '{kwpat}'
+    LIMIT 12
+    """
+    programs = []
+    try:
+        programs = _connect_and_query(programs_q)
+    except Exception:
+        programs = []
+
+    # 7) build concrete 3-phase learning plan for top 3 recommended roles
+    top_roles = role_summaries[:3] if role_summaries else []
+    phases = {"short_term": [], "mid_term": [], "long_term": []}
+    for r in top_roles:
+        role = r["role"]
+        gap = r["gap"]
+        matched = r["matched"]
+        # Short-term (1-3 months): micro-skills & small project
+        st = {
+            "role": role,
+            "duration": "1-3 months",
+            "activities": [],
+            "goal": f"Become application-ready for entry-level {role} openings."
+        }
+        if matched:
+            st["activities"].append(f"Leverage existing skills: {', '.join(matched)}")
+        if gap:
+            st["activities"].append(f"Learn core missing skills: {', '.join(gap[:4])}")
+        st["activities"].append("Complete 1 small portfolio piece (1-page project or 60-90s video).")
+        st["activities"].append("Create/refresh LinkedIn and portfolio highlights.")
+        phases["short_term"].append(st)
+
+        # Mid-term (3-9 months): certifications, deeper projects
+        mt = {
+            "role": role,
+            "duration": "3-9 months",
+            "activities": [
+                "Complete an industry-relevant certification or micro-credential (see suggestions below).",
+                "Build 2-3 projects for portfolio; get feedback from mentors.",
+                "Apply to 8-12 targeted roles; iterate resume/cover letters."
+            ]
+        }
+        phases["mid_term"].append(mt)
+
+        # Long-term (9-18 months): advanced skills, employer partnerships
+        lt = {
+            "role": role,
+            "duration": "9-18 months",
+            "activities": [
+                "Lead a larger portfolio project with measurable outcomes.",
+                "Negotiate for higher wage roles, specialize in a sub-area (e.g., motion graphics).",
+                "Pursue longer credentials or apprenticeship if available."
+            ]
+        }
+        phases["long_term"].append(lt)
+
+    # 8) recommend certifications (from global certs list, or DB matches)
+    # we'll search your `certifications` table for ones with keyword in name/description
+    certs_q = f"""
+    SELECT certification_id, certification_name, issuing_organization, certification_type, description
+    FROM hackathon.amer.certifications
+    WHERE lower(certification_name) LIKE '{kwpat}' OR lower(description) LIKE '{kwpat}'
+    LIMIT 12
+    """
+    cert_candidates = []
+    try:
+        cert_candidates = _connect_and_query(certs_q)
+    except Exception:
+        cert_candidates = []
+
+    # If none found, suggest a small static list by keyword
+    cert_fallback = {
+        "media": ["Google Digital Garage (Fundamentals)", "HubSpot Content Marketing Certification", "Adobe Certified Associate (Photoshop/Premiere)"],
+        "technology": ["Coursera/LinkedIn: Frontend Developer Nanodegree", "AWS Cloud Practitioner", "Google Data Analytics Certificate"],
+    }
+    suggested_certs = cert_candidates if cert_candidates else [{"certification_name": c} for c in cert_fallback.get(keyword.lower(), cert_fallback.get("media", []))]
+
+    # 9) project suggestions mapped to student's history
+    portfolio_suggestions = []
+    for r in top_roles:
+        role = r["role"]
+        if "video" in role.lower() or "content" in role.lower() or "media" in keyword.lower():
+            portfolio_suggestions.append({"role": role, "suggestion": "Produce a 60-90s demo reel + 3 short social clips; host on YouTube/Vimeo and include links."})
+        elif "developer" in role.lower() or "engineer" in role.lower():
+            portfolio_suggestions.append({"role": role, "suggestion": "Publish 2 small projects to GitHub with README and deploy a demo."})
+        else:
+            portfolio_suggestions.append({"role": role, "suggestion": "Create one strong case study documenting problem → approach → results."})
+
+    # 10) craft Markdown output
+    md_lines = []
+    md_lines.append(f"# Personalized Learning Path & Career Suggestions for {core.get('student_id') or student_id}")
+    md_lines.append(f"**Target area:** {keyword}")
+    md_lines.append(f"**Prepared on:** {datetime.utcnow().date().isoformat()}")
+    md_lines.append("")
+    md_lines.append("## Recommended Target Roles (scored by current skill match)")
+    for s in role_summaries[:10]:
+        md_lines.append(f"- **{s['role']}** — match score: {s['match_score']}; matched: {', '.join(s['matched']) or 'none'}; gaps: {', '.join(s['gap']) or 'none'}")
+    md_lines.append("")
+    md_lines.append("## 3-Phase Learning Plan (top recommended roles)")
+    for phase_name, items in [("Short term (1-3 months)", phases["short_term"]), ("Mid term (3-9 months)", phases["mid_term"]), ("Long term (9-18 months)", phases["long_term"])]:
+        md_lines.append(f"### {phase_name}")
+        for it in items:
+            md_lines.append(f"**{it['role']}** — {it.get('goal','')}")
+            for a in it["activities"]:
+                md_lines.append(f"- {a}")
+        md_lines.append("")
+
+    md_lines.append("## Recommended Certifications / Micro-credentials")
+    if suggested_certs:
+        for c in suggested_certs[:10]:
+            name = c.get("certification_name") or c.get("certification") or str(c)
+            org = c.get("issuing_organization") or c.get("certification_type") or ""
+            md_lines.append(f"- {name} {(' — ' + org) if org else ''}")
+    else:
+        md_lines.append("- No specific certs found; consider industry micro-credentials from Coursera, edX, Adobe, Google.")
+
+    md_lines.append("")
+    md_lines.append("## Programs at our organization that match this area")
+    if programs:
+        for p in programs:
+            md_lines.append(f"- **{p.get('program_name')}** — { (p.get('description') or '')[:260] }")
+    else:
+        md_lines.append("- No matching programs found in the database for this keyword.")
+
+    md_lines.append("")
+    md_lines.append("## Portfolio / Project Suggestions")
+    for ps in portfolio_suggestions:
+        md_lines.append(f"- **{ps['role']}**: {ps['suggestion']}")
+
+    md_lines.append("")
+    md_lines.append("## Quick LinkedIn pitch (copy/paste)")
+    # brief pitch
+    pitch = f"{core.get('student_id') or student_id} — Aspiring {keyword} professional. Actively building portfolio work and certifications to demonstrate practical skills; open to entry-level {', '.join([r['role'] for r in top_roles[:2]])} roles. DM to connect or view portfolio."
+    md_lines.append(pitch)
+    md = "\n\n".join(md_lines)
+
+    result = {
+        "learning_path_md": md,
+        "structured": {
+            "core": core, "skills": skills, "certifications": certs, "academics": academics,
+            "placements": placements, "role_summaries": role_summaries, "program_matches": programs,
+            "cert_candidates": suggested_certs, "portfolio_suggestions": portfolio_suggestions
+        }
+    }
+
+    # 11) Optional: call Databricks model to rewrite into a friendly student plan
+    if call_model:
+        try:
+            db_endpoint = os.getenv("DATABRICKS_MODEL_ENDPOINT")
+            token = os.getenv("DATABRICKS_TOKEN")
+            if db_endpoint and token:
+                messages = [
+                    {"role":"system", "content": "You are a friendly career coach who writes clear learning plans for students."},
+                    {"role":"user", "content": "Rewrite the following learning plan into an encouraging, step-by-step student-facing plan:\n\n" + md}
+                ]
+                # call existing helper
+                polished = call_databricks_model(prompt=None, messages=messages, endpoint_url=db_endpoint, token=token, temperature=0.2, max_tokens=800)
+                result["model_output"] = polished
+        except Exception as e:
+            result["model_error"] = str(e)
+
+    return result
+
+# alias with original misspelled name
+definelearinggolasandsuggestioions = define_learning_goals_and_suggestions
+
+# small helper used above
+def _keywords_from_text(text: str, min_len: int = 3) -> List[str]:
+    if not text:
+        return []
+    text = re.sub(r"[^\w\s]", " ", text.lower())
+    words = [w for w in text.split() if len(w) >= min_len]
+    stop = {"the","and","for","with","from","that","this","their","have","will","are","our","in","on","to","a","an","of","jobs"}
+    keywords = [w for w in words if w not in stop]
+    return list(dict.fromkeys(keywords))
